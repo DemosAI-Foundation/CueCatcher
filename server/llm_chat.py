@@ -1,488 +1,311 @@
 """
-LLM Chat Module for CueCatcher
-Connects to local llama.cpp server and analyzes session data from SQLite or JSON files
+CueCatcher LLM Chat Interface
+Real-time chat with local LLM (llama.cpp) about session data.
 """
-import sqlite3
-import requests
 import json
-from typing import Optional, List, Dict, Any
+import sqlite3
+import httpx
+from datetime import datetime, timezone
 from pathlib import Path
+from typing import Optional, AsyncGenerator, Dict, Any
+from loguru import logger
 
-# Configuration
-LLAMA_CPP_URL = "http://127.0.0.1:8083"
-DB_PATH = Path(__file__).parent.parent / "data" / "compass.db"
-SESSIONS_DIR = Path(__file__).parent.parent / "data" / "sessions"
+# Database path matches server/recorder.py
+DB_PATH = "data/compass.db"
 
-def get_session_data_from_db(session_id: str) -> Dict[str, Any]:
-    """Fetch real session data from SQLite database or JSON files as fallback"""
-    
-    # Try SQLite first
-    if DB_PATH.exists():
-        try:
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            # Get session info
-            cursor.execute("""
-                SELECT id, started_at, ended_at, duration as duration_seconds, notes
-                FROM sessions 
-                WHERE id = ?
-            """, (session_id,))
-            session_row = cursor.fetchone()
-            
-            if session_row:
-                result = _build_session_data_from_cursor(session_row, cursor, session_id)
-                conn.close()
-                return result
-            
-            conn.close()
-        except Exception as e:
-            print(f"SQLite error: {e}")
-    
-    # Fallback to JSON files in sessions directory
-    return _load_session_from_json(session_id)
+def get_db_connection():
+    """Get a connection to the SQLite database."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Enable column access by name
+    return conn
 
-def _load_session_from_json(session_id: str) -> Dict[str, Any]:
-    """Load session data from JSON summary file as fallback"""
-    summary_path = SESSIONS_DIR / session_id / "summary.json"
+async def fetch_session_data(session_id: str) -> Dict[str, Any]:
+    """Fetch session data directly from SQLite database."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
     
-    if not summary_path.exists():
-        return {"error": f"Session {session_id} not found in database or filesystem"}
-    
-    try:
-        with open(summary_path, 'r') as f:
-            summary = json.load(f)
-        
-        session_data = {
-            "session_id": summary.get("session_id", session_id),
-            "child_name": "Unknown",
-            "started_at": summary.get("started_at", ""),
-            "ended_at": summary.get("ended_at", ""),
-            "duration_seconds": summary.get("duration_minutes", 0) * 60,
-            "frames": [],
-            "episodes": [],
-            "states": [],
-            "gaze_analysis": [],
-            "emotions": [],
-            "audio_events": [],
-            "summary": {
-                "total_frames": summary.get("total_frames", 0),
-                "total_episodes": summary.get("total_episodes", 0),
-                "gaze_alternations": summary.get("gaze_alternation_count", 0),
-                "positive_emotions": 0,
-                "vocalizations": int(summary.get("vocalization_seconds", 0)),
-                "communicative_episodes": 0,
-                "state_durations": summary.get("state_durations", {}),
-                "most_common_state": summary.get("most_common_state", "")
-            }
-        }
-        
-        # Load episodes if available
-        episodes_path = SESSIONS_DIR / session_id / "episodes.json"
-        if episodes_path.exists():
-            with open(episodes_path, 'r') as f:
-                episodes_data = json.load(f)
-                if isinstance(episodes_data, list):
-                    session_data["episodes"] = episodes_data[:100]
-        
-        # Load states if available
-        states_path = SESSIONS_DIR / session_id / "states.json"
-        if states_path.exists():
-            with open(states_path, 'r') as f:
-                states_data = json.load(f)
-                if isinstance(states_data, list):
-                    session_data["states"] = states_data[:100]
-        
-        return session_data
-        
-    except Exception as e:
-        return {"error": f"Error loading session from JSON: {str(e)}"}
-
-def _build_session_data_from_cursor(session_row, cursor, session_id: str) -> Dict[str, Any]:
-    """Build session data from SQLite cursor results using detections table"""
     session_data = {
-        "session_id": session_row["id"],
-        "child_name": session_row["notes"] or "Unknown",
-        "started_at": session_row["started_at"],
-        "ended_at": session_row["ended_at"],
-        "duration_seconds": session_row["duration_seconds"],
+        "session_id": session_id,
         "frames": [],
         "episodes": [],
         "states": [],
-        "gaze_analysis": [],
-        "emotions": [],
-        "audio_events": [],
         "summary": {}
     }
     
     try:
-        # Get detections from the detections table
+        # 1. Fetch Frames (Tier 1 Data)
         cursor.execute("""
-            SELECT id, frame_idx, timestamp, person_confidence, pose_keypoints_json, num_keypoints,
-                   head_yaw, head_pitch, head_roll, gaze_target, looking_at_camera,
-                   face_detected, expression, expression_confidence, mouth_openness, smile_score,
-                   is_vocalization, vocalization_class, vocalization_confidence,
-                   pitch_hz, energy_db, child_state, child_state_confidence,
-                   actions_json, episodes_json
-            FROM detections 
-            WHERE session_id = ?
-            ORDER BY timestamp
-            LIMIT 500
+            SELECT timestamp, pose_data, gaze_data, face_data, audio_data, action_data
+            FROM frames 
+            WHERE session_id = ? 
+            ORDER BY timestamp ASC
         """, (session_id,))
         
         frames = []
-        gaze_targets = []
-        emotions = []
-        audio_events = []
-        states = []
-        episodes = []
-        
         for row in cursor.fetchall():
-            # Parse JSON fields
-            pose_keypoints = json.loads(row["pose_keypoints_json"]) if row["pose_keypoints_json"] else {}
-            actions = json.loads(row["actions_json"]) if row["actions_json"] else {}
-            eps = json.loads(row["episodes_json"]) if row["episodes_json"] else {}
-            
-            frame_info = {
-                "frame_idx": row["frame_idx"],
+            frames.append({
                 "timestamp": row["timestamp"],
-                "person_confidence": row["person_confidence"],
-                "head_yaw": row["head_yaw"],
-                "head_pitch": row["head_pitch"],
-                "head_roll": row["head_roll"],
-                "gaze_target": row["gaze_target"],
-                "looking_at_camera": row["looking_at_camera"],
-                "face_detected": row["face_detected"],
-                "expression": row["expression"],
-                "expression_confidence": row["expression_confidence"],
-                "mouth_openness": row["mouth_openness"],
-                "smile_score": row["smile_score"],
-                "is_vocalization": row["is_vocalization"],
-                "vocalization_class": row["vocalization_class"],
-                "vocalization_confidence": row["vocalization_confidence"],
-                "pitch_hz": row["pitch_hz"],
-                "energy_db": row["energy_db"],
-                "child_state": row["child_state"],
-                "child_state_confidence": row["child_state_confidence"],
-                "pose_keypoints": pose_keypoints,
-                "actions": actions,
-                "episodes": eps
-            }
-            frames.append(frame_info)
-            
-            # Extract gaze target
-            if row["gaze_target"]:
-                gaze_targets.append({
-                    "timestamp": row["timestamp"],
-                    "target": row["gaze_target"]
-                })
-            
-            # Extract emotion/expression
-            if row["expression"]:
-                emotions.append({
-                    "timestamp": row["timestamp"],
-                    "emotion": row["expression"],
-                    "confidence": row["expression_confidence"]
-                })
-            
-            # Extract vocalization/audio events
-            if row["is_vocalization"] or row["vocalization_class"]:
-                audio_events.append({
-                    "timestamp": row["timestamp"],
-                    "event": row["vocalization_class"] or "vocalization",
-                    "confidence": row["vocalization_confidence"],
-                    "pitch_hz": row["pitch_hz"],
-                    "energy_db": row["energy_db"]
-                })
-            
-            # Extract child state
-            if row["child_state"]:
-                states.append({
-                    "timestamp": row["timestamp"],
-                    "state": row["child_state"],
-                    "confidence": row["child_state_confidence"]
-                })
-            
-            # Extract episodes from episodes_json
-            if eps and isinstance(eps, list):
-                for ep in eps:
-                    if isinstance(ep, dict):
-                        episodes.append({
-                            "timestamp": row["timestamp"],
-                            "type": ep.get("type", "unknown"),
-                            "confidence": ep.get("confidence", 0),
-                            "description": ep.get("description", "")
-                        })
-        
+                "pose": json.loads(row["pose_data"]) if row["pose_data"] else {},
+                "gaze": json.loads(row["gaze_data"]) if row["gaze_data"] else {},
+                "face": json.loads(row["face_data"]) if row["face_data"] else {},
+                "audio": json.loads(row["audio_data"]) if row["audio_data"] else {},
+                "action": json.loads(row["action_data"]) if row["action_data"] else {},
+            })
         session_data["frames"] = frames
-        session_data["gaze_analysis"] = gaze_targets[:100]
-        session_data["emotions"] = emotions[:100]
-        session_data["audio_events"] = audio_events[:100]
-        session_data["states"] = states[:100]
-        session_data["episodes"] = episodes[:100]
+
+        # 2. Fetch Episodes (Tier 2 Data - Behavioral Patterns)
+        cursor.execute("""
+            SELECT timestamp, episode_type, confidence, details
+            FROM episodes 
+            WHERE session_id = ? 
+            ORDER BY timestamp ASC
+        """, (session_id,))
         
-        # Calculate summary statistics
-        session_data["summary"] = {
-            "total_frames": len(frames),
-            "total_episodes": len(episodes),
-            "gaze_alternations": len([g for g in gaze_targets if g["target"] == "alternating"]),
-            "positive_emotions": len([e for e in emotions if e["emotion"].lower() in ["happy", "excited", "engaged", "smile", "joy"]]),
-            "vocalizations": len([a for a in audio_events if a["event"]]),
-            "communicative_episodes": len([e for e in episodes if e.get("confidence", 0) > 0.7])
-        }
+        episodes = []
+        for row in cursor.fetchall():
+            episodes.append({
+                "timestamp": row["timestamp"],
+                "type": row["episode_type"],
+                "confidence": row["confidence"],
+                "details": json.loads(row["details"]) if row["details"] else {}
+            })
+        session_data["episodes"] = episodes
+
+        # 3. Fetch States (Tier 3 Data - Child State)
+        cursor.execute("""
+            SELECT timestamp, state, confidence, interpretation
+            FROM states 
+            WHERE session_id = ? 
+            ORDER BY timestamp ASC
+        """, (session_id,))
         
-        return session_data
+        states = []
+        for row in cursor.fetchall():
+            states.append({
+                "timestamp": row["timestamp"],
+                "state": row["state"],
+                "confidence": row["confidence"],
+                "interpretation": row["interpretation"]
+            })
+        session_data["states"] = states
+
+        # 4. Fetch Session Summary/Metadata
+        cursor.execute("""
+            SELECT start_time, end_time, duration, notes
+            FROM sessions 
+            WHERE id = ?
+        """, (session_id,))
         
+        summary_row = cursor.fetchone()
+        if summary_row:
+            session_data["summary"] = {
+                "start_time": summary_row["start_time"],
+                "end_time": summary_row["end_time"],
+                "duration": summary_row["duration"],
+                "notes": summary_row["notes"]
+            }
+            
     except Exception as e:
-        return {"error": f"Database error: {str(e)}"}
+        logger.error(f"Error fetching session data from DB: {e}")
+        raise
+    finally:
+        conn.close()
+        
+    return session_data
 
 
-def build_llm_prompt(session_data: Dict[str, Any], user_question: str) -> str:
-    """Build a structured prompt for the LLM with session context"""
-    
-    if "error" in session_data:
-        return f"Error loading session data: {session_data['error']}\n\nUser question: {user_question}"
-    
-    summary = session_data.get("summary", {})
-    
-    prompt = f"""You are CueCatcher AI, an expert assistant analyzing non-verbal communication patterns in children. You have access to real session data from a recent interaction.
-
-SESSION OVERVIEW:
-- Child: {session_data.get('child_name', 'Unknown')}
-- Session ID: {session_data.get('session_id', 'N/A')}
-- Duration: {session_data.get('duration_seconds', 0):.1f} seconds
-- Total frames analyzed: {summary.get('total_frames', 0)}
-- Behavioral episodes detected: {summary.get('total_episodes', 0)}
-
-KEY METRICS:
-- Gaze alternations (looking between object and person): {summary.get('gaze_alternations', 0)}
-- Positive emotional expressions: {summary.get('positive_emotions', 0)}
-- Vocalizations detected: {summary.get('vocalizations', 0)}
-- High-confidence communicative acts: {summary.get('communicative_episodes', 0)}
-
-RECENT GAZE PATTERNS (sample):
-{json.dumps(session_data.get('gaze_analysis', [])[:10], indent=2)}
-
-RECENT EMOTIONS (sample):
-{json.dumps(session_data.get('emotions', [])[:10], indent=2)}
-
-BEHAVIORAL EPISODES (highlights):
-{json.dumps(session_data.get('episodes', [])[:10], indent=2)}
-
-COMMUNICATIVE STATES (sample):
-{json.dumps(session_data.get('states', [])[:10], indent=2)}
-
-Based on this REAL data from the session, please answer the following question thoughtfully and provide actionable insights for parents and therapists:
-
-USER QUESTION: {user_question}
-
-Provide your response in a warm, supportive tone. Focus on the child's strengths and competencies. If you notice patterns suggesting intentional communication, highlight them. Be specific about timestamps or moments when important behaviors occurred."""
-
-    return prompt
-
-def chat_with_llm(session_id: str, user_message: str, conversation_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
+class LLMChatSession:
     """
-    Send user message to llama.cpp with session context
-    Returns direct response (non-streaming)
+    Chat interface for querying session data via LLM.
+    
+    This module:
+    1. Connects to local llama.cpp backend (default: http://127.0.0.1:8083)
+    2. Builds context from current/past session data
+    3. Streams chat responses in real-time
+    4. Maintains conversation history
     """
     
-    # Fetch real session data from SQLite
-    session_data = get_session_data_from_db(session_id)
+    def __init__(
+        self, 
+        llama_url: str = "http://127.0.0.1:8083",
+        session_dir: Path = Path("./data/sessions")
+    ):
+        self.llama_url = llama_url.rstrip("/")
+        self.session_dir = session_dir
+        self.conversation_history = []
+        self.current_session_data = None
+        self._client = None
+        self._accumulated_response = ""
     
-    # Build prompt with context
-    system_prompt = build_llm_prompt(session_data, user_message)
-    
-    # Prepare request for llama.cpp using OpenAI-compatible /v1/chat/completions endpoint
-    messages = [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": user_message}
-    ]
-    
-    # Add conversation history if provided
-    if conversation_history:
-        # Insert history between system and current user message
-        messages = [messages[0]] + conversation_history + [messages[1]]
-    
-    payload = {
-        "model": "default",  # llama.cpp ignores this but it's required by the API
-        "messages": messages,
-        "max_tokens": 500,
-        "temperature": 0.7,
-        "top_p": 0.9,
-        "stream": False  # Non-streaming response
-    }
-    
-    try:
-        # Check if llama.cpp is available
-        health_check = requests.get(f"{LLAMA_CPP_URL}/health", timeout=5)
-        if health_check.status_code != 200:
-            return {
-                "success": False,
-                "error": "llama.cpp server health check failed",
-                "response": None
-            }
-        
-        # Send request to OpenAI-compatible endpoint
-        print(f"Sending request to llama.cpp at {LLAMA_CPP_URL}/v1/chat/completions")
-        print(f"Prompt length: {len(system_prompt)} chars")
-        response = requests.post(
-            f"{LLAMA_CPP_URL}/v1/chat/completions",
-            json=payload,
-            timeout=60,
-            headers={"Content-Type": "application/json"}
-        )
-        
-        print(f"llama.cpp response status: {response.status_code}")
-        print(f"llama.cpp response body: {response.text[:500]}")
-        
-        if response.status_code == 200:
-            result = response.json()
-            print(f"Parsed result: {result}")
-            
-            # Extract content from OpenAI-compatible response format
-            llm_response = ""
-            if "choices" in result and len(result["choices"]) > 0:
-                choice = result["choices"][0]
-                if "message" in choice and "content" in choice["message"]:
-                    llm_response = choice["message"]["content"]
-            
-            if not llm_response:
-                # Fallback: try direct content field
-                llm_response = result.get("content", "")
-            
-            return {
-                "success": True,
-                "response": llm_response,
-                "session_data_loaded": True if "error" not in session_data else False,
-                "metrics": session_data.get("summary", {}) if "error" not in session_data else None
-            }
-        else:
-            return {
-                "success": False,
-                "error": f"llama.cpp returned status {response.status_code}",
-                "details": response.text[:500] if response.text else "No details"
-            }
-            
-    except requests.exceptions.ConnectionError:
-        return {
-            "success": False,
-            "error": f"Cannot connect to llama.cpp at {LLAMA_CPP_URL}. Make sure it's running.",
-            "hint": "Start llama.cpp with: ./server -m your-model.gguf --host 127.0.0.1 --port 8083"
-        }
-    except requests.exceptions.Timeout:
-        return {
-            "success": False,
-            "error": "Request timed out. The model may be processing a large context."
-        }
-    except Exception as e:
-        return {
-            "success": False,
-            "error": str(e)
-        }
-
-def get_available_sessions() -> List[Dict]:
-    """Get list of all sessions from database or filesystem"""
-    sessions = []
-    
-    # Try SQLite first
-    if DB_PATH.exists():
+    async def connect(self):
+        """Test connection to llama.cpp backend."""
         try:
-            conn = sqlite3.connect(str(DB_PATH))
-            conn.row_factory = sqlite3.Row
-            cursor = conn.cursor()
-            
-            cursor.execute("""
-                SELECT id, started_at, ended_at, duration as duration_seconds, notes
-                FROM sessions
-                ORDER BY started_at DESC
-                LIMIT 50
-            """)
-            
-            for row in cursor.fetchall():
-                sessions.append({
-                    "id": row["id"],
-                    "child_name": row["notes"] or "Unknown",
-                    "started_at": row["started_at"],
-                    "ended_at": row["ended_at"],
-                    "duration_seconds": row["duration_seconds"]
-                })
-            
-            conn.close()
-            
-            if sessions:
-                return sessions
+            self._client = httpx.AsyncClient(timeout=60.0)
+            # Test endpoint - llama.cpp uses /health or just check root
+            resp = await self._client.get(f"{self.llama_url}/")
+            if resp.status_code == 200:
+                logger.info(f"✅ Connected to llama.cpp at {self.llama_url}")
+                return True
         except Exception as e:
-            print(f"SQLite error: {e}")
+            logger.warning(f"⚠️ Cannot connect to llama.cpp at {self.llama_url}: {e}")
+            self._client = None
+            return False
+        return False
     
-    # Fallback to filesystem - scan sessions directory
-    if SESSIONS_DIR.exists():
-        try:
-            for session_folder in SESSIONS_DIR.iterdir():
-                if session_folder.is_dir():
-                    summary_path = session_folder / "summary.json"
-                    if summary_path.exists():
-                        with open(summary_path, 'r') as f:
-                            summary = json.load(f)
-                            sessions.append({
-                                "id": session_folder.name,
-                                "child_name": "Unknown",
-                                "started_at": summary.get("started_at", ""),
-                                "ended_at": summary.get("ended_at", ""),
-                                "duration_seconds": summary.get("duration_minutes", 0) * 60
-                            })
-            
-            # Sort by started_at descending
-            sessions.sort(key=lambda x: x["started_at"], reverse=True)
-            sessions = sessions[:50]  # Limit to 50
-            
-        except Exception as e:
-            print(f"Filesystem scan error: {e}")
+    def set_current_session(self, session_data: dict):
+        """Set the current session data for context."""
+        self.current_session_data = session_data
     
-    return sessions
+    def _build_system_prompt(self) -> str:
+        """Build system prompt for the chat."""
+        return """You are CueCatcher AI, a compassionate assistant helping caregivers understand non-verbal children's communication.
 
-if __name__ == "__main__":
-    # Test the module
-    print("Testing LLM Chat Module...")
+ROLE:
+- You analyze behavioral data (gaze, reach, vocalizations, facial expressions)
+- You explain what the child might be trying to communicate
+- You use strengths-based language focusing on the child's competence
+- You acknowledge uncertainty - interpretations are hypotheses, not facts
+- You encourage caregivers and validate their observations
+
+CONTEXT:
+- Gaze alternation (looking between object and person) is a sophisticated social signal
+- Coordinated signals (reach + gaze + vocal) indicate intentional communication
+- The child may be minimally verbal or non-verbal
+- Every communicative attempt matters and should be celebrated
+
+GUIDELINES:
+- Use warm, accessible language (avoid jargon)
+- Explain technical terms when needed
+- Suggest practical strategies to encourage communication
+- Acknowledge when data is limited or ambiguous
+- Never diagnose - you're observing patterns, not making clinical judgments"""
+
+    def _build_context_message(self) -> str:
+        """Build context from current session data."""
+        if not self.current_session_data:
+            return "No active session data available."
+        
+        ctx = []
+        ctx.append(f"**Current Session**: {self.current_session_data.get('session_id', 'unknown')[:8]}...")
+        
+        summary = self.current_session_data.get('session_summary', {})
+        ctx.append(f"- Duration: {summary.get('duration_minutes', 0):.1f} minutes")
+        ctx.append(f"- Episodes detected: {summary.get('total_episodes', 0)}")
+        ctx.append(f"- Interpretations generated: {summary.get('total_interpretations', 0)}")
+        
+        highlights = self.current_session_data.get('communication_highlights', {})
+        ctx.append(f"- Gaze alternations: {highlights.get('gaze_alternation_count', 0)}")
+        ctx.append(f"- Coordinated signals: {highlights.get('coordinated_signals_count', 0)}")
+        
+        patterns = self.current_session_data.get('behavioral_patterns', {})
+        if patterns:
+            ctx.append("\n**Behavioral Patterns**:")
+            most_common = patterns.get('most_common_behaviors', {})
+            if most_common:
+                ctx.append(f"- Most common behaviors: {', '.join(list(most_common.keys())[:5])}")
+            combos = patterns.get('coordinated_signal_combos', {})
+            if combos:
+                ctx.append(f"- Signal combinations: {', '.join(list(combos.keys())[:3])}")
+        
+        return "\n".join(ctx)
     
-    # Check database
-    if DB_PATH.exists():
-        print(f"✅ Database found at {DB_PATH}")
+    async def chat(self, user_message: str, stream: bool = True) -> AsyncGenerator[str, None]:
+        """
+        Send a message and stream the response.
         
-        # Get sessions
-        sessions = get_available_sessions()
-        print(f"📋 Found {len(sessions)} sessions")
+        Args:
+            user_message: User's question or comment
+            stream: Whether to stream the response token-by-token
         
-        if sessions:
-            test_session = sessions[0]
-            print(f"\n🧪 Testing with session: {test_session['id']}")
+        Yields:
+            Response tokens as they arrive
+        """
+        if not self._client:
+            yield "⚠️ Not connected to LLM. Please check that llama.cpp is running at " + self.llama_url
+            return
+        
+        # Build messages array
+        messages = [
+            {"role": "system", "content": self._build_system_prompt()},
+            {"role": "user", "content": f"Context:\n{self._build_context_message()}\n\nUser question: {user_message}"}
+        ]
+        
+        # Add conversation history (last 10 exchanges)
+        for msg in self.conversation_history[-10:]:
+            messages.insert(-1, msg)
+        
+        try:
+            # llama.cpp completion endpoint (OpenAI compatible)
+            payload = {
+                "prompt": self._format_messages_for_llama(messages),
+                "temperature": 0.7,
+                "max_tokens": 512,
+                "top_p": 0.9,
+                "stream": stream,
+                "stop": ["User:", "\n\n"],
+            }
             
-            # Fetch data
-            data = get_session_data_from_db(test_session['id'])
-            if "error" in data:
-                print(f"❌ Error: {data['error']}")
+            if stream:
+                async with self._client.stream("POST", f"{self.llama_url}/completion", json=payload) as resp:
+                    if resp.status_code != 200:
+                        yield f"Error: HTTP {resp.status_code}"
+                        return
+                    
+                    async for line in resp.aiter_lines():
+                        if line.startswith("data: "):
+                            data = json.loads(line[6:])
+                            content = data.get("content", "")
+                            if content:
+                                yield content
+                                # Store in history
+                                self._accumulated_response += content
             else:
-                print(f"✅ Loaded {data['summary']['total_frames']} frames")
-                print(f"✅ Found {data['summary']['gaze_alternations']} gaze alternations")
-                
-                # Test LLM
-                print("\n🤖 Sending to LLM...")
-                result = chat_with_llm(
-                    test_session['id'],
-                    "What communication patterns do you see in this session?"
-                )
-                
-                if result["success"]:
-                    print(f"\n💬 LLM Response:\n{result['response'][:500]}...")
+                resp = await self._client.post(f"{self.llama_url}/completion", json=payload)
+                if resp.status_code == 200:
+                    result = resp.json()
+                    content = result.get("content", "")
+                    yield content
                 else:
-                    print(f"\n❌ LLM Error: {result['error']}")
-    else:
-        print(f"❌ Database not found at {DB_PATH}")
+                    yield f"Error: HTTP {resp.status_code}"
+            
+            # Save to conversation history
+            self.conversation_history.append({"role": "user", "content": user_message})
+            self.conversation_history.append({"role": "assistant", "content": self._accumulated_response})
+            self._accumulated_response = ""
+            
+        except httpx.ConnectError:
+            yield "⚠️ Cannot connect to llama.cpp. Is it running at " + self.llama_url + "?"
+        except Exception as e:
+            yield f"Error: {str(e)}"
+    
+    def _format_messages_for_llama(self, messages: list) -> str:
+        """Format messages for llama.cpp prompt format."""
+        formatted = []
+        for msg in messages:
+            role = msg["role"]
+            content = msg["content"]
+            if role == "system":
+                formatted.append(f"System: {content}")
+            elif role == "user":
+                formatted.append(f"User: {content}")
+            elif role == "assistant":
+                formatted.append(f"Assistant: {content}")
+        formatted.append("Assistant:")
+        return "\n".join(formatted)
+    
+    def clear_history(self):
+        """Clear conversation history."""
+        self.conversation_history = []
+        self._accumulated_response = ""
 
-def get_llm_chat():
-    """Factory function to provide LLM chat functionality"""
-    return {
-        "chat_with_llm": chat_with_llm,
-        "get_session_data": get_session_data_from_db,
-        "get_available_sessions": get_available_sessions
-    }
+
+# Global instance for API use
+_chat_instance: Optional[LLMChatSession] = None
+
+async def get_llm_chat() -> LLMChatSession:
+    """Get or create the global LLM chat instance."""
+    global _chat_instance
+    if _chat_instance is None:
+        _chat_instance = LLMChatSession()
+        await _chat_instance.connect()
+    return _chat_instance
