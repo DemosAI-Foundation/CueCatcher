@@ -1,6 +1,6 @@
 """
 LLM Chat Module for CueCatcher
-Connects to local llama.cpp server and analyzes session data from SQLite
+Connects to local llama.cpp server and analyzes session data from SQLite or JSON files
 """
 import sqlite3
 import requests
@@ -11,46 +11,121 @@ from pathlib import Path
 # Configuration
 LLAMA_CPP_URL = "http://127.0.0.1:8083"
 DB_PATH = Path(__file__).parent.parent / "data" / "compass.db"
+SESSIONS_DIR = Path(__file__).parent.parent / "data" / "sessions"
 
 def get_session_data_from_db(session_id: str) -> Dict[str, Any]:
-    """Fetch real session data from SQLite database"""
-    if not DB_PATH.exists():
-        return {"error": f"Database not found at {DB_PATH}"}
+    """Fetch real session data from SQLite database or JSON files as fallback"""
+    
+    # Try SQLite first
+    if DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            # Get session info
+            cursor.execute("""
+                SELECT id, started_at, ended_at, duration as duration_seconds, notes
+                FROM sessions 
+                WHERE id = ?
+            """, (session_id,))
+            session_row = cursor.fetchone()
+            
+            if session_row:
+                result = _build_session_data_from_cursor(session_row, cursor, session_id)
+                conn.close()
+                return result
+            
+            conn.close()
+        except Exception as e:
+            print(f"SQLite error: {e}")
+    
+    # Fallback to JSON files in sessions directory
+    return _load_session_from_json(session_id)
+
+def _load_session_from_json(session_id: str) -> Dict[str, Any]:
+    """Load session data from JSON summary file as fallback"""
+    summary_path = SESSIONS_DIR / session_id / "summary.json"
+    
+    if not summary_path.exists():
+        return {"error": f"Session {session_id} not found in database or filesystem"}
     
     try:
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        # Get session info
-        cursor.execute("""
-            SELECT id, child_name, started_at, ended_at, duration_seconds
-            FROM sessions 
-            WHERE id = ?
-        """, (session_id,))
-        session_row = cursor.fetchone()
-        
-        if not session_row:
-            conn.close()
-            return {"error": f"Session {session_id} not found"}
+        with open(summary_path, 'r') as f:
+            summary = json.load(f)
         
         session_data = {
-            "session_id": session_row["id"],
-            "child_name": session_row["child_name"],
-            "started_at": session_row["started_at"],
-            "ended_at": session_row["ended_at"],
-            "duration_seconds": session_row["duration_seconds"],
+            "session_id": summary.get("session_id", session_id),
+            "child_name": "Unknown",
+            "started_at": summary.get("started_at", ""),
+            "ended_at": summary.get("ended_at", ""),
+            "duration_seconds": summary.get("duration_minutes", 0) * 60,
             "frames": [],
             "episodes": [],
             "states": [],
             "gaze_analysis": [],
-            "summary": {}
+            "emotions": [],
+            "audio_events": [],
+            "summary": {
+                "total_frames": summary.get("total_frames", 0),
+                "total_episodes": summary.get("total_episodes", 0),
+                "gaze_alternations": summary.get("gaze_alternation_count", 0),
+                "positive_emotions": 0,
+                "vocalizations": int(summary.get("vocalization_seconds", 0)),
+                "communicative_episodes": 0,
+                "state_durations": summary.get("state_durations", {}),
+                "most_common_state": summary.get("most_common_state", "")
+            }
         }
         
-        # Get frames with detections
+        # Load episodes if available
+        episodes_path = SESSIONS_DIR / session_id / "episodes.json"
+        if episodes_path.exists():
+            with open(episodes_path, 'r') as f:
+                episodes_data = json.load(f)
+                if isinstance(episodes_data, list):
+                    session_data["episodes"] = episodes_data[:100]
+        
+        # Load states if available
+        states_path = SESSIONS_DIR / session_id / "states.json"
+        if states_path.exists():
+            with open(states_path, 'r') as f:
+                states_data = json.load(f)
+                if isinstance(states_data, list):
+                    session_data["states"] = states_data[:100]
+        
+        return session_data
+        
+    except Exception as e:
+        return {"error": f"Error loading session from JSON: {str(e)}"}
+
+def _build_session_data_from_cursor(session_row, cursor, session_id: str) -> Dict[str, Any]:
+    """Build session data from SQLite cursor results using detections table"""
+    session_data = {
+        "session_id": session_row["id"],
+        "child_name": session_row["notes"] or "Unknown",
+        "started_at": session_row["started_at"],
+        "ended_at": session_row["ended_at"],
+        "duration_seconds": session_row["duration_seconds"],
+        "frames": [],
+        "episodes": [],
+        "states": [],
+        "gaze_analysis": [],
+        "emotions": [],
+        "audio_events": [],
+        "summary": {}
+    }
+    
+    try:
+        # Get detections from the detections table
         cursor.execute("""
-            SELECT timestamp, frame_data, detections
-            FROM frames 
+            SELECT id, frame_idx, timestamp, person_confidence, pose_keypoints_json, num_keypoints,
+                   head_yaw, head_pitch, head_roll, gaze_target, looking_at_camera,
+                   face_detected, expression, expression_confidence, mouth_openness, smile_score,
+                   is_vocalization, vocalization_class, vocalization_confidence,
+                   pitch_hz, energy_db, child_state, child_state_confidence,
+                   actions_json, episodes_json
+            FROM detections 
             WHERE session_id = ?
             ORDER BY timestamp
             LIMIT 500
@@ -60,97 +135,108 @@ def get_session_data_from_db(session_id: str) -> Dict[str, Any]:
         gaze_targets = []
         emotions = []
         audio_events = []
+        states = []
+        episodes = []
         
         for row in cursor.fetchall():
+            # Parse JSON fields
+            pose_keypoints = json.loads(row["pose_keypoints_json"]) if row["pose_keypoints_json"] else {}
+            actions = json.loads(row["actions_json"]) if row["actions_json"] else {}
+            eps = json.loads(row["episodes_json"]) if row["episodes_json"] else {}
+            
             frame_info = {
+                "frame_idx": row["frame_idx"],
                 "timestamp": row["timestamp"],
-                "detections": json.loads(row["detections"]) if row["detections"] else {}
+                "person_confidence": row["person_confidence"],
+                "head_yaw": row["head_yaw"],
+                "head_pitch": row["head_pitch"],
+                "head_roll": row["head_roll"],
+                "gaze_target": row["gaze_target"],
+                "looking_at_camera": row["looking_at_camera"],
+                "face_detected": row["face_detected"],
+                "expression": row["expression"],
+                "expression_confidence": row["expression_confidence"],
+                "mouth_openness": row["mouth_openness"],
+                "smile_score": row["smile_score"],
+                "is_vocalization": row["is_vocalization"],
+                "vocalization_class": row["vocalization_class"],
+                "vocalization_confidence": row["vocalization_confidence"],
+                "pitch_hz": row["pitch_hz"],
+                "energy_db": row["energy_db"],
+                "child_state": row["child_state"],
+                "child_state_confidence": row["child_state_confidence"],
+                "pose_keypoints": pose_keypoints,
+                "actions": actions,
+                "episodes": eps
             }
             frames.append(frame_info)
             
-            # Extract specific signals
-            detections = frame_info["detections"]
-            
-            # Gaze target
-            if "gaze_target" in detections:
+            # Extract gaze target
+            if row["gaze_target"]:
                 gaze_targets.append({
                     "timestamp": row["timestamp"],
-                    "target": detections["gaze_target"]
+                    "target": row["gaze_target"]
                 })
             
-            # Emotion
-            if "emotion" in detections:
+            # Extract emotion/expression
+            if row["expression"]:
                 emotions.append({
                     "timestamp": row["timestamp"],
-                    "emotion": detections["emotion"]
+                    "emotion": row["expression"],
+                    "confidence": row["expression_confidence"]
                 })
             
-            # Audio events
-            if "audio_event" in detections:
+            # Extract vocalization/audio events
+            if row["is_vocalization"] or row["vocalization_class"]:
                 audio_events.append({
                     "timestamp": row["timestamp"],
-                    "event": detections["audio_event"]
+                    "event": row["vocalization_class"] or "vocalization",
+                    "confidence": row["vocalization_confidence"],
+                    "pitch_hz": row["pitch_hz"],
+                    "energy_db": row["energy_db"]
                 })
+            
+            # Extract child state
+            if row["child_state"]:
+                states.append({
+                    "timestamp": row["timestamp"],
+                    "state": row["child_state"],
+                    "confidence": row["child_state_confidence"]
+                })
+            
+            # Extract episodes from episodes_json
+            if eps and isinstance(eps, list):
+                for ep in eps:
+                    if isinstance(ep, dict):
+                        episodes.append({
+                            "timestamp": row["timestamp"],
+                            "type": ep.get("type", "unknown"),
+                            "confidence": ep.get("confidence", 0),
+                            "description": ep.get("description", "")
+                        })
         
         session_data["frames"] = frames
-        session_data["gaze_analysis"] = gaze_targets[:100]  # Limit for context
+        session_data["gaze_analysis"] = gaze_targets[:100]
         session_data["emotions"] = emotions[:100]
         session_data["audio_events"] = audio_events[:100]
-        
-        # Get episodes
-        cursor.execute("""
-            SELECT timestamp, episode_type, confidence, description
-            FROM episodes 
-            WHERE session_id = ?
-            ORDER BY timestamp
-            LIMIT 100
-        """, (session_id,))
-        
-        episodes = []
-        for row in cursor.fetchall():
-            episodes.append({
-                "timestamp": row["timestamp"],
-                "type": row["episode_type"],
-                "confidence": row["confidence"],
-                "description": row["description"]
-            })
-        
-        session_data["episodes"] = episodes
-        
-        # Get states
-        cursor.execute("""
-            SELECT timestamp, state, confidence
-            FROM states 
-            WHERE session_id = ?
-            ORDER BY timestamp
-            LIMIT 100
-        """, (session_id,))
-        
-        states = []
-        for row in cursor.fetchall():
-            states.append({
-                "timestamp": row["timestamp"],
-                "state": row["state"],
-                "confidence": row["confidence"]
-            })
-        
-        session_data["states"] = states
+        session_data["states"] = states[:100]
+        session_data["episodes"] = episodes[:100]
         
         # Calculate summary statistics
         session_data["summary"] = {
             "total_frames": len(frames),
             "total_episodes": len(episodes),
             "gaze_alternations": len([g for g in gaze_targets if g["target"] == "alternating"]),
-            "positive_emotions": len([e for e in emotions if e["emotion"] in ["happy", "excited", "engaged"]]),
-            "vocalizations": len([a for a in audio_events if a["event"] in ["vocalization", "laugh", "babble"]]),
-            "communicative_episodes": len([e for e in episodes if e["confidence"] > 0.7])
+            "positive_emotions": len([e for e in emotions if e["emotion"].lower() in ["happy", "excited", "engaged", "smile", "joy"]]),
+            "vocalizations": len([a for a in audio_events if a["event"]]),
+            "communicative_episodes": len([e for e in episodes if e.get("confidence", 0) > 0.7])
         }
         
-        conn.close()
         return session_data
         
     except Exception as e:
         return {"error": f"Database error: {str(e)}"}
+
 
 def build_llm_prompt(session_data: Dict[str, Any], user_question: str) -> str:
     """Build a structured prompt for the LLM with session context"""
@@ -271,38 +357,64 @@ def chat_with_llm(session_id: str, user_message: str, conversation_history: Opti
         }
 
 def get_available_sessions() -> List[Dict]:
-    """Get list of all sessions from database"""
-    if not DB_PATH.exists():
-        return []
+    """Get list of all sessions from database or filesystem"""
+    sessions = []
     
-    try:
-        conn = sqlite3.connect(str(DB_PATH))
-        conn.row_factory = sqlite3.Row
-        cursor = conn.cursor()
-        
-        cursor.execute("""
-            SELECT id, child_name, started_at, ended_at, duration_seconds
-            FROM sessions
-            ORDER BY started_at DESC
-            LIMIT 50
-        """)
-        
-        sessions = []
-        for row in cursor.fetchall():
-            sessions.append({
-                "id": row["id"],
-                "child_name": row["child_name"],
-                "started_at": row["started_at"],
-                "ended_at": row["ended_at"],
-                "duration_seconds": row["duration_seconds"]
-            })
-        
-        conn.close()
-        return sessions
-        
-    except Exception as e:
-        print(f"Error fetching sessions: {e}")
-        return []
+    # Try SQLite first
+    if DB_PATH.exists():
+        try:
+            conn = sqlite3.connect(str(DB_PATH))
+            conn.row_factory = sqlite3.Row
+            cursor = conn.cursor()
+            
+            cursor.execute("""
+                SELECT id, started_at, ended_at, duration as duration_seconds, notes
+                FROM sessions
+                ORDER BY started_at DESC
+                LIMIT 50
+            """)
+            
+            for row in cursor.fetchall():
+                sessions.append({
+                    "id": row["id"],
+                    "child_name": row["notes"] or "Unknown",
+                    "started_at": row["started_at"],
+                    "ended_at": row["ended_at"],
+                    "duration_seconds": row["duration_seconds"]
+                })
+            
+            conn.close()
+            
+            if sessions:
+                return sessions
+        except Exception as e:
+            print(f"SQLite error: {e}")
+    
+    # Fallback to filesystem - scan sessions directory
+    if SESSIONS_DIR.exists():
+        try:
+            for session_folder in SESSIONS_DIR.iterdir():
+                if session_folder.is_dir():
+                    summary_path = session_folder / "summary.json"
+                    if summary_path.exists():
+                        with open(summary_path, 'r') as f:
+                            summary = json.load(f)
+                            sessions.append({
+                                "id": session_folder.name,
+                                "child_name": "Unknown",
+                                "started_at": summary.get("started_at", ""),
+                                "ended_at": summary.get("ended_at", ""),
+                                "duration_seconds": summary.get("duration_minutes", 0) * 60
+                            })
+            
+            # Sort by started_at descending
+            sessions.sort(key=lambda x: x["started_at"], reverse=True)
+            sessions = sessions[:50]  # Limit to 50
+            
+        except Exception as e:
+            print(f"Filesystem scan error: {e}")
+    
+    return sessions
 
 if __name__ == "__main__":
     # Test the module
