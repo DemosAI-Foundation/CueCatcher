@@ -20,7 +20,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
@@ -505,7 +505,7 @@ async def analyze_longitudinal_llm(days: int = Query(30, ge=7, le=365), with_nar
 # ── LLM Chat Endpoint ──────────────────────────────────────────
 
 @router.post("/chat")
-async def chat_with_llm(message: dict):
+async def chat_with_llm(message: dict, request: Request):
     """
     Real-time chat with local LLM about session data.
     
@@ -541,4 +541,9 @@ async def chat_with_llm(message: dict):
             "metrics": result.get("metrics", {})
         }
     else:
-        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
+        # Return error in response body instead of raising HTTPException
+        return {
+            "success": False,
+            "error": result.get("error", "Unknown error"),
+            "hint": result.get("hint", "")
+        }
