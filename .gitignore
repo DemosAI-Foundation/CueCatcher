@@ -1,8 +1,1 @@
-```
-# Python compiled files
-*.pyc
-__pycache__/
-
-# Database file (if it's a generated/development database)
-data/cuecatcher.db
-```
+Nothing needs to be added to .gitignore since only a Python source file (`server/llm_chat.py`) was modified and no build artifacts, dependencies, or temporary files were detected in the changes.
