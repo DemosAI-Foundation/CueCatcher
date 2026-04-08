@@ -284,24 +284,33 @@ Provide your response in a warm, supportive tone. Focus on the child's strengths
 def chat_with_llm(session_id: str, user_message: str, conversation_history: Optional[List[Dict]] = None) -> Dict[str, Any]:
     """
     Send user message to llama.cpp with session context
-    Returns streaming response or error
+    Returns direct response (non-streaming)
     """
     
     # Fetch real session data from SQLite
     session_data = get_session_data_from_db(session_id)
     
     # Build prompt with context
-    prompt = build_llm_prompt(session_data, user_message)
+    system_prompt = build_llm_prompt(session_data, user_message)
     
-    # Prepare request for llama.cpp
-    # Using the completion endpoint compatible with llama-server
+    # Prepare request for llama.cpp using OpenAI-compatible /v1/chat/completions endpoint
+    messages = [
+        {"role": "system", "content": system_prompt},
+        {"role": "user", "content": user_message}
+    ]
+    
+    # Add conversation history if provided
+    if conversation_history:
+        # Insert history between system and current user message
+        messages = [messages[0]] + conversation_history + [messages[1]]
+    
     payload = {
-        "prompt": prompt,
-        "n_predict": 500,
+        "model": "default",  # llama.cpp ignores this but it's required by the API
+        "messages": messages,
+        "max_tokens": 500,
         "temperature": 0.7,
         "top_p": 0.9,
-        "repeat_penalty": 1.1,
-        "stream": False  # Set to True for streaming support
+        "stream": False  # Non-streaming response
     }
     
     try:
@@ -314,11 +323,11 @@ def chat_with_llm(session_id: str, user_message: str, conversation_history: Opti
                 "response": None
             }
         
-        # Send completion request
-        print(f"Sending request to llama.cpp at {LLAMA_CPP_URL}/completion")
-        print(f"Prompt length: {len(prompt)} chars")
+        # Send request to OpenAI-compatible endpoint
+        print(f"Sending request to llama.cpp at {LLAMA_CPP_URL}/v1/chat/completions")
+        print(f"Prompt length: {len(system_prompt)} chars")
         response = requests.post(
-            f"{LLAMA_CPP_URL}/completion",
+            f"{LLAMA_CPP_URL}/v1/chat/completions",
             json=payload,
             timeout=60,
             headers={"Content-Type": "application/json"}
@@ -330,11 +339,17 @@ def chat_with_llm(session_id: str, user_message: str, conversation_history: Opti
         if response.status_code == 200:
             result = response.json()
             print(f"Parsed result: {result}")
-            llm_response = result.get("content", "")
+            
+            # Extract content from OpenAI-compatible response format
+            llm_response = ""
+            if "choices" in result and len(result["choices"]) > 0:
+                choice = result["choices"][0]
+                if "message" in choice and "content" in choice["message"]:
+                    llm_response = choice["message"]["content"]
             
             if not llm_response:
-                # Try alternative response format
-                llm_response = result.get("response", "")
+                # Fallback: try direct content field
+                llm_response = result.get("content", "")
             
             return {
                 "success": True,
