@@ -99,9 +99,9 @@ class Settings(BaseSettings):
     tts_max_utterance_length: int = 100  # chars
 
     # ── Storage ──
-    db_url: str = ""  # Empty = no database, uses in-memory buffers + JSON files
+    db_url: str = "sqlite:///data/cuecatcher.db"  # SQLite database (default)
     # Example SQLite: "sqlite:///data/cuecatcher.db"
-    # Example PostgreSQL: "postgresql+asyncpg://user:pass@localhost:5432/CueCatcher"
+    # Leave empty for no database (in-memory buffers + JSON files only)
 
     # ── Privacy ──
     store_raw_video: bool = False      # default: only store metadata

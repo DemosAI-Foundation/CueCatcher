@@ -1,5 +1,5 @@
 """
-CueCatcher REST API — Dashboard, History, and Therapist Export
+CueCatcher REST API — Dashboard, History, Therapist Export, and LLM Analysis
 
 Endpoints for the longitudinal communication dashboard:
   /api/dashboard/summary     — overall communication trends
@@ -10,9 +10,13 @@ Endpoints for the longitudinal communication dashboard:
   /api/sessions/{id}         — session detail
   /api/sessions/{id}/export  — CSV export for therapists
   /api/sessions/{id}/replay  — replay data stream
+  /api/sessions/{id}/analyze — LLM-powered session analysis
+  /api/analysis/longitudinal — LLM-powered multi-session analysis
+  /api/chat                  — Real-time chat with local LLM about session data
 """
 
 import json
+import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
@@ -20,29 +24,35 @@ from fastapi import APIRouter, Query
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
-try:
-    import asyncpg
-    PG_AVAILABLE = True
-except ImportError:
-    PG_AVAILABLE = False
-
 from config.settings import settings
 
 
 router = APIRouter(prefix="/api", tags=["dashboard"])
 
-DB_URL = settings.db_url.replace("+asyncpg", "")
+# SQLite database path
+DB_PATH = None
+if settings.db_url and settings.db_url.startswith("sqlite"):
+    DB_PATH = settings.db_url.replace("sqlite:///", "")
+    if not DB_PATH.startswith("/"):
+        # Make absolute relative to project root
+        import sys as _sys
+        base = Path(__file__).parent.parent if _sys.platform != "win32" else Path(__file__).parent.parent
+        DB_PATH = str(base / DB_PATH)
+
 import sys as _sys
 SESSION_DIR = Path("/data/sessions") if _sys.platform != "win32" else Path(__file__).parent.parent / "data" / "sessions"
 
 
 # ── Helpers ────────────────────────────────────────────────────
 
-async def _get_pool():
-    if not PG_AVAILABLE:
+def _get_db_connection():
+    """Get SQLite database connection."""
+    if not DB_PATH:
         return None
     try:
-        return await asyncpg.create_pool(DB_URL, min_size=1, max_size=3)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        return conn
     except Exception:
         return None
 
@@ -435,3 +445,97 @@ def _fallback_summary():
         "communication_trend": "unknown",
         "source": "disk",
     }
+
+
+# ── LLM Analysis Endpoints ─────────────────────────────────────
+
+@router.get("/sessions/{session_id}/analyze")
+async def analyze_session_llm(session_id: str, with_narrative: bool = Query(False)):
+    """
+    Analyze a single session with LLM-powered insights.
+    
+    Returns structured analysis and optionally generates natural language narrative.
+    """
+    from server.llm_analyzer import LLMSessionAnalyzer, generate_llm_report
+    
+    analyzer = LLMSessionAnalyzer(settings.db_url or "", SESSION_DIR)
+    await analyzer.connect()
+    
+    try:
+        if with_narrative:
+            # Note: requires llm_client to be configured
+            result = await generate_llm_report(analyzer, session_id, llm_client=None)
+        else:
+            result = await analyzer.analyze_session(session_id, include_video_timestamps=True)
+        
+        return result
+    finally:
+        await analyzer.close()
+
+
+@router.get("/analysis/longitudinal")
+async def analyze_longitudinal_llm(days: int = Query(30, ge=7, le=365), with_narrative: bool = Query(False)):
+    """
+    Analyze multiple sessions over time with LLM-powered insights.
+    
+    Generates developmental trends, patterns, and recommendations.
+    """
+    from server.llm_analyzer import LLMSessionAnalyzer
+    
+    analyzer = LLMSessionAnalyzer(settings.db_url or "", SESSION_DIR)
+    await analyzer.connect()
+    
+    try:
+        result = await analyzer.analyze_longitudinal(days=days)
+        
+        # Optionally call LLM for narrative (requires llm_client configuration)
+        if with_narrative and result.get("total_sessions", 0) > 0:
+            try:
+                # Placeholder for LLM integration
+                # In production, integrate with OpenAI/Anthropic/Ollama
+                result["llm_narrative"] = "LLM narrative generation requires API key configuration."
+            except Exception as e:
+                logger.warning(f"LLM narrative generation failed: {e}")
+        
+        return result
+    finally:
+        await analyzer.close()
+
+
+# ── LLM Chat Endpoint ──────────────────────────────────────────
+
+@router.post("/chat")
+async def chat_with_llm(message: dict):
+    """
+    Real-time chat with local LLM about session data.
+    
+    Expects: {"message": "user question", "session_id": "optional session id"}
+    Returns: Streaming response with LLM answer
+    """
+    from server.llm_chat import get_llm_chat
+    from fastapi.responses import StreamingResponse
+    
+    user_message = message.get("message", "")
+    session_id = message.get("session_id")
+    
+    if not user_message:
+        return {"error": "No message provided"}
+    
+    # Get LLM chat instance
+    chat = await get_llm_chat()
+    
+    # Load session data if session_id provided
+    if session_id:
+        analyzer = LLMSessionAnalyzer(settings.db_url or "", SESSION_DIR)
+        await analyzer.connect()
+        session_data = await analyzer.analyze_session(session_id)
+        chat.set_current_session(session_data)
+        await analyzer.close()
+    
+    # Stream response
+    async def generate():
+        async for token in chat.chat(user_message, stream=True):
+            yield f"data: {json.dumps({'token': token})}\n"
+        yield "data: [DONE]\n"
+    
+    return StreamingResponse(generate(), media_type="text/event-stream")

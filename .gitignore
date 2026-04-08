@@ -1,47 +1,53 @@
 ```
-# Logs and temp files
-*.log
-*.tmp
-
-# Environment
-.env
-.env.local
-.env.*
-
-# Editors
-.vscode/
-.idea/
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
 .Python
+env/
 venv/
 .venv/
 .env
-env/
-ENV/
-.venv.bak/
-venv.bak/
+.env.local
+*.env.*
 
 # Build artifacts
 build/
 dist/
 *.egg-info/
-.coverage
-htmlcov/
-.coverage.*
-.nyc_output/
-coverage-final.json
 
-# OS generated files
+# Logs
+*.log
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
-.DS_Store?
-._*
-.Spotlight-V100
-.Trashes
-ehthumbs.db
 Thumbs.db
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# Testing
+.pytest_cache/
+.mypy_cache/
+
+# Node.js (if present)
+node_modules/
+
+# Java/Maven (if present)
+target/
+.gradle/
+*.class
+
+# General temp files
+*.tmp
+*.temp
 ```
