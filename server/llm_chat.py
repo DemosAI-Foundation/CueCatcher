@@ -15,7 +15,7 @@ class LLMChatSession:
     Chat interface for querying session data via LLM.
     
     This module:
-    1. Connects to local llama.cpp backend (default: http://127.0.0.1:8083)
+    1. Connects to local llama.cpp backend (default: http://127.0.0.1:8080)
     2. Builds context from current/past session data
     3. Streams chat responses in real-time
     4. Maintains conversation history
@@ -31,13 +31,14 @@ class LLMChatSession:
         self.conversation_history = []
         self.current_session_data = None
         self._client = None
+        self._accumulated_response = ""
     
     async def connect(self):
         """Test connection to llama.cpp backend."""
         try:
             self._client = httpx.AsyncClient(timeout=60.0)
-            # Test endpoint
-            resp = await self._client.get(f"{self.llama_url}/health")
+            # Test endpoint - llama.cpp uses /health or just check root
+            resp = await self._client.get(f"{self.llama_url}/")
             if resp.status_code == 200:
                 logger.info(f"✅ Connected to llama.cpp at {self.llama_url}")
                 return True
@@ -130,7 +131,7 @@ GUIDELINES:
             messages.insert(-1, msg)
         
         try:
-            # llama.cpp completion endpoint
+            # llama.cpp completion endpoint (OpenAI compatible)
             payload = {
                 "prompt": self._format_messages_for_llama(messages),
                 "temperature": 0.7,
