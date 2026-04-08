@@ -13,12 +13,19 @@ cd CueCatcher
 # 2. Download models (first time only)
 python scripts/download_models.py
 
-# 3. Start the stack
+# 3. Start the stack (optional: /DB for advanced features)
 docker compose up -d
+# OR run standalone without Docker: just start the server directly
 
 # 4. Open the tablet UI
 # Navigate to http://<server-ip>:8084 on your tablet
 ```
+
+**Note:** CueCatcher works **without any database**.  and DB are optional enhancements:
+- **No database required**: Core real-time interpretation works standalone with in-memory buffers and JSON session files
+- **** (optional): Enhances frame buffering performance
+- **DB/PostgreSQL** (optional): Enables long-term analytics, therapist exports, and longitudinal dashboards
+- **SQLite**: Supported for basic persistence if PostgreSQL is not available
 
 ## ToDo
 
@@ -46,7 +53,7 @@ docker compose up -d
 - [] Pipeline fully wired (all modules connected)
 
 ### Phase 4: Recording & Analysis 
-- [] Session recording to TimescaleDB
+- [] Session recording to DB
 - [] Session replay and therapist CSV export
 - [] Longitudinal dashboard (daily/weekly trends)
 - [] Hourly communication heatmap
@@ -142,11 +149,15 @@ GET /api/dashboard/hourly?days=7      # when does she communicate?
                                    └────────────────────────┘
                                               │
                               ┌───────────────┼───────────────┐
+                              │               │               │
                               ▼               ▼               ▼
                          ┌────────┐    ┌───────────┐   ┌────────────┐
-                         │ Redis  │    │TimescaleDB│   │ Voxtral TTS│
-                         │(buffer)│    │(history)  │   │(voice out) │
+                         │ ? │    │DB│   │ Voxtral TTS│
+                         │(opt)   │    │(opt)      │   │(voice out) │
                          └────────┘    └───────────┘   └────────────┘
+                                              │
+                              (All components work without DBs
+                               using in-memory buffers + JSON files)
 ```
 
 
@@ -173,7 +184,7 @@ CueCatcher/
 ├── config/
 │   ├── settings.py      # Central configuration
 │   ├── behaviors.yaml   # Learned behavior dictionary
-│   └── init.sql         # TimescaleDB schema
+│   └── init.sql         # DB schema
 ├── scripts/
 │   ├── setup.sh         # Environment setup
 │   ├── setup_voice_clone.sh  # Voice cloning encoder setup

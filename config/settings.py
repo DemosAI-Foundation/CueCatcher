@@ -99,8 +99,9 @@ class Settings(BaseSettings):
     tts_max_utterance_length: int = 100  # chars
 
     # ── Storage ──
-    redis_url: str = "redis://localhost:6379/0"
-    db_url: str = "postgresql+asyncpg://CueCatcher:CueCatcher@localhost:5432/CueCatcher"
+    db_url: str = ""  # Empty = no database, uses in-memory buffers + JSON files
+    # Example SQLite: "sqlite:///data/cuecatcher.db"
+    # Example PostgreSQL: "postgresql+asyncpg://user:pass@localhost:5432/CueCatcher"
 
     # ── Privacy ──
     store_raw_video: bool = False      # default: only store metadata

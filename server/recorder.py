@@ -58,7 +58,7 @@ class SessionSummary:
 
 
 class SessionRecorder:
-    """Records session data to TimescaleDB and optionally to video."""
+    """Records session data to SQL database and optionally to video."""
 
     def __init__(self, db_url: str, session_dir: Path = Path("./data/sessions")):
         self.db_url = db_url
@@ -80,7 +80,7 @@ class SessionRecorder:
         self._state_start = 0.0
 
     async def connect(self):
-        """Connect to TimescaleDB, or fall back to in-memory."""
+        """Connect to SQL database, or fall back to in-memory."""
         if not self.db_url or not self.db_url.startswith(("postgresql://", "postgres://")):
             if self.db_url and "sqlite" in self.db_url:
                 logger.warning("⚠️ SQLite DSN detected — asyncpg requires PostgreSQL. Using in-memory buffer.")
@@ -102,7 +102,7 @@ class SessionRecorder:
             )
             async with self._pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
-            logger.info("✅ Session recorder connected to TimescaleDB")
+            logger.info("✅ Session recorder connected to SQL database")
         except Exception as e:
             logger.warning(f"⚠️ DB connection failed: {e} — recording to memory only")
             self._pool = None
@@ -290,7 +290,7 @@ class SessionRecorder:
         return summary
 
     async def _flush_batch(self):
-        """Flush accumulated detection batches to TimescaleDB."""
+        """Flush accumulated detection batches to SQL database."""
         if not self._pool:
             self._detection_batch.clear()
             self._episode_batch.clear()
