@@ -20,7 +20,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Query, HTTPException
+from fastapi import APIRouter, Query, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
@@ -505,15 +505,14 @@ async def analyze_longitudinal_llm(days: int = Query(30, ge=7, le=365), with_nar
 # ── LLM Chat Endpoint ──────────────────────────────────────────
 
 @router.post("/chat")
-async def chat_with_llm(message: dict):
+async def chat_with_llm(message: dict, request: Request = None):
     """
     Real-time chat with local LLM about session data.
     
     Expects: {"message": "user question", "session_id": "optional session id"}
-    Returns: Streaming response with LLM answer
+    Returns: JSON response with LLM answer
     """
-    from server.llm_chat import chat_with_llm
-    from fastapi.responses import StreamingResponse
+    from server.llm_chat import chat_with_llm as llm_chat_function
     import json
     
     user_message = message.get("message", "")
@@ -523,7 +522,7 @@ async def chat_with_llm(message: dict):
         return {"error": "No message provided"}
     
     # Get current session ID from request state if not provided
-    if not session_id:
+    if not session_id and request:
         session_id = getattr(request.state, "current_session_id", None)
     
     if not session_id:
@@ -532,7 +531,7 @@ async def chat_with_llm(message: dict):
     # Call the synchronous chat function in a thread pool
     import asyncio
     loop = asyncio.get_event_loop()
-    result = await loop.run_in_executor(None, lambda: chat_with_llm(session_id, user_message))
+    result = await loop.run_in_executor(None, lambda: llm_chat_function(session_id, user_message))
     
     if result.get("success"):
         return {
