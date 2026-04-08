@@ -341,3 +341,11 @@ if __name__ == "__main__":
                     print(f"\n❌ LLM Error: {result['error']}")
     else:
         print(f"❌ Database not found at {DB_PATH}")
+
+def get_llm_chat():
+    """Factory function to provide LLM chat functionality"""
+    return {
+        "chat_with_llm": chat_with_llm,
+        "get_session_data": get_session_data_from_db,
+        "get_available_sessions": get_available_sessions
+    }

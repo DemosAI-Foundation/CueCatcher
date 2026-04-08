@@ -20,7 +20,7 @@ import sqlite3
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Query
+from fastapi import APIRouter, Query, HTTPException
 from fastapi.responses import FileResponse, JSONResponse
 from loguru import logger
 
@@ -512,8 +512,9 @@ async def chat_with_llm(message: dict):
     Expects: {"message": "user question", "session_id": "optional session id"}
     Returns: Streaming response with LLM answer
     """
-    from server.llm_chat import get_llm_chat
+    from server.llm_chat import chat_with_llm
     from fastapi.responses import StreamingResponse
+    import json
     
     user_message = message.get("message", "")
     session_id = message.get("session_id")
@@ -521,24 +522,23 @@ async def chat_with_llm(message: dict):
     if not user_message:
         return {"error": "No message provided"}
     
-    # Get LLM chat instance
-    chat = await get_llm_chat()
+    # Get current session ID from app state if not provided
+    if not session_id:
+        session_id = getattr(app.state, "current_session_id", None)
     
-    # Load session data if session_id provided
-    if session_id:
-        try:
-            from server.llm_chat import fetch_session_data
-            session_data = await fetch_session_data(session_id)
-            chat.set_current_session(session_data)
-        except Exception as e:
-            logger.error(f"Error loading session data from DB: {e}")
-            # Fallback to empty session data
-            chat.set_current_session({"session_id": session_id, "error": str(e)})
+    if not session_id:
+        return {"error": "No session ID provided. Start a session first or provide session_id in request."}
     
-    # Stream response
-    async def generate():
-        async for token in chat.chat(user_message, stream=True):
-            yield f"data: {json.dumps({'token': token})}\n"
-        yield "data: [DONE]\n"
+    # Call the synchronous chat function in a thread pool
+    import asyncio
+    loop = asyncio.get_event_loop()
+    result = await loop.run_in_executor(None, lambda: chat_with_llm(session_id, user_message))
     
-    return StreamingResponse(generate(), media_type="text/event-stream")
+    if result.get("success"):
+        return {
+            "response": result["response"],
+            "session_data_loaded": result.get("session_data_loaded", False),
+            "metrics": result.get("metrics", {})
+        }
+    else:
+        raise HTTPException(status_code=500, detail=result.get("error", "Unknown error"))
