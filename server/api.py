@@ -526,11 +526,14 @@ async def chat_with_llm(message: dict):
     
     # Load session data if session_id provided
     if session_id:
-        analyzer = LLMSessionAnalyzer(settings.db_url or "", SESSION_DIR)
-        await analyzer.connect()
-        session_data = await analyzer.analyze_session(session_id)
-        chat.set_current_session(session_data)
-        await analyzer.close()
+        try:
+            from server.llm_chat import fetch_session_data
+            session_data = await fetch_session_data(session_id)
+            chat.set_current_session(session_data)
+        except Exception as e:
+            logger.error(f"Error loading session data from DB: {e}")
+            # Fallback to empty session data
+            chat.set_current_session({"session_id": session_id, "error": str(e)})
     
     # Stream response
     async def generate():
