@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, useCallback } from "react";
 import DebugPanel from "./DebugPanel";
 import Dashboard from "./Dashboard";
 import SkeletonOverlay from "./SkeletonOverlay";
+import LLMChat from "./LLMChat";
 
 // ── Configuration ─────────────────────────────────────────────
 const DEFAULT_COMM_BUTTONS = [
@@ -38,7 +39,8 @@ export default function CueCatcherApp() {
   const [currentInterp, setCurrentInterp] = useState(null);
   const [fps, setFps] = useState(0);
   const [frameCount, setFrameCount] = useState(0);
-  const [view, setView] = useState("live"); // live | dashboard | settings
+  const [view, setView] = useState("live"); // live | dashboard | chat | settings
+  const [currentSessionId, setCurrentSessionId] = useState(null);
   const [commButtons, setCommButtons] = useState(DEFAULT_COMM_BUTTONS);
   const [commMode, setCommMode] = useState(false);
   const [boardSize, setBoardSize] = useState(3);
@@ -76,7 +78,14 @@ export default function CueCatcherApp() {
     ws.onclose = () => { setConnected(false); if (mountedRef.current) setTimeout(connect, 3000); };
     ws.onerror = () => {};
     ws.onmessage = (e) => {
-      if (typeof e.data === "string") { return; }
+      if (typeof e.data === "string") {
+        // Handle text messages (session responses)
+        try {
+          const data = JSON.parse(e.data);
+          if (data.session_id) handleSessionResponse(data);
+        } catch {}
+        return;
+      }
       if (!(e.data instanceof ArrayBuffer)) return;
       const bytes = new Uint8Array(e.data);
       if (bytes.length === 0) return;
@@ -185,6 +194,14 @@ export default function CueCatcherApp() {
     const next = !sessionActive;
     ws.send(JSON.stringify({ action: next ? "start" : "stop" }));
     setSessionActive(next);
+    // Session ID will be set when we receive the response from server
+  };
+
+  // Handle session start/stop responses
+  const handleSessionResponse = (data) => {
+    if (data.session_id) {
+      setCurrentSessionId(data.session_id);
+    }
   };
 
   const sendFeedback = (id, fb) => {
@@ -247,11 +264,12 @@ export default function CueCatcherApp() {
         </div>
       </header>
 
-      {/* Nav — 4 tabs */}
+      {/* Nav — 5 tabs */}
       <nav style={s.nav}>
         {[
           { id: "live", label: "📹 Live" },
-          { id: "talk", label: "💬 Talk" },
+          { id: "talk", label: "💬 AAC" },
+          { id: "chat", label: "🧭 Ask AI" },
           { id: "dashboard", label: "📊 Dashboard" },
           { id: "settings", label: "⚙️ Settings" },
         ].map(v => (
@@ -322,6 +340,13 @@ export default function CueCatcherApp() {
 
         {/* ── DASHBOARD VIEW ── */}
         {view === "dashboard" && <Dashboard />}
+
+        {/* ── LLM CHAT VIEW ── */}
+        {view === "chat" && (
+          <div style={{ padding: 12, height: "calc(100% - 80px)" }}>
+            <LLMChat sessionId={currentSessionId} />
+          </div>
+        )}
 
         {/* ── SETTINGS VIEW ── */}
         {view === "settings" && (
