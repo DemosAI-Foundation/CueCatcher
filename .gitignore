@@ -1,29 +1,39 @@
 ```
-# Database files
-*.db
-
 # Python
 __pycache__/
 *.pyc
 *.pyo
 *.pyd
-.Python
-env/
+
+# Database
+data/compass.db
+
+# Environment
+.env
+.env.local
+*.env.*
+
+# Logs
+*.log
+
+# Temporary files
+*.tmp
+*.swp
+*.swo
+
+# Coverage
+.coverage
+coverage/
+htmlcov/
+
+# IDE
+.vscode/
+.idea/
+
+# Dependencies
+node_modules/
 venv/
 .venv/
-.ENV
-.python-version
-pip-log.txt
-pip-delete-this-directory.txt
-.tox/
-.coverage
-.coverage.*
-.cache
-nosetests.xml
-coverage.xml
-*.cover
-*.log
-.git/modules/
-.DS_Store
-Thumbs.db
+.mypy_cache/
+.pytest_cache/
 ```

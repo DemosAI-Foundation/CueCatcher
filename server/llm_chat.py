@@ -315,6 +315,8 @@ def chat_with_llm(session_id: str, user_message: str, conversation_history: Opti
             }
         
         # Send completion request
+        print(f"Sending request to llama.cpp at {LLAMA_CPP_URL}/completion")
+        print(f"Prompt length: {len(prompt)} chars")
         response = requests.post(
             f"{LLAMA_CPP_URL}/completion",
             json=payload,
@@ -322,9 +324,17 @@ def chat_with_llm(session_id: str, user_message: str, conversation_history: Opti
             headers={"Content-Type": "application/json"}
         )
         
+        print(f"llama.cpp response status: {response.status_code}")
+        print(f"llama.cpp response body: {response.text[:500]}")
+        
         if response.status_code == 200:
             result = response.json()
+            print(f"Parsed result: {result}")
             llm_response = result.get("content", "")
+            
+            if not llm_response:
+                # Try alternative response format
+                llm_response = result.get("response", "")
             
             return {
                 "success": True,
