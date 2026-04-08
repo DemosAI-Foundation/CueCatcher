@@ -1,0 +1,41 @@
+# CueCatcher Windows Dependencies
+# Install PyTorch separately first:
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu124
+
+# ── Server (all Windows-compatible) ──
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+websockets==13.0
+python-multipart==0.0.9
+pydantic==2.9.0
+pydantic-settings==2.5.0
+
+# ── ML / Inference (all Windows-compatible) ──
+numpy==1.26.4
+opencv-python-headless==4.10.0.84
+Pillow==10.4.0
+mediapipe==0.10.15
+scipy==1.14.1
+scikit-learn==1.5.2
+
+# ── Audio ──
+librosa==0.10.2
+soundfile==0.12.1
+
+# ── TTS ──
+transformers==4.46.0
+huggingface-hub==0.26.0
+
+# ── Data / Storage ──
+pyyaml==6.0.2
+loguru==0.7.2
+orjson==3.10.7
+aiosqlite==0.20.0
+
+# ── Optional (install if available) ──
+# redis==5.1.0          # Optional: install Redis for Windows separately
+# asyncpg==0.29.0       # Optional: only needed with PostgreSQL/TimescaleDB
+# vllm                  # Optional: for local TTS (Linux-only currently)
+# ultralytics           # Optional: YOLO11 (works on Windows)
+# mmpose                # Linux-only, system auto-falls back to MediaPipe
+# mmaction2             # Linux-only, system auto-falls back to rule-based

@@ -1,0 +1,101 @@
+version: "3.9"
+
+services:
+  # ── Core Application Server ──────────────────────────────────
+  CueCatcher-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: CueCatcher-server
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=all
+      - NVIDIA_DRIVER_CAPABILITIES=compute,utility,video
+      - REDIS_URL=redis://redis:6379/0
+      - DB_URL=postgresql://CueCatcher:CueCatcher@timescaledb:5432/CueCatcher
+      - MODEL_DIR=/models
+      - VOXTRAL_MODEL=Mistral-AI/Voxtral-4B-TTS-2603
+      - CUDA_VISIBLE_DEVICES=0
+    ports:
+      - "8084:8084"     # HTTP + WebSocket
+      - "8443:8443"     # HTTPS + WSS (for camera access on mobile)
+    volumes:
+      - ./server:/app/server
+      - ./inference:/app/inference
+      - ./voice:/app/voice
+      - ./config:/app/config
+      - ./ui/dist:/app/static
+      - model-cache:/models
+      - session-data:/data/sessions
+      - ./certs:/app/certs:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+        limits:
+          memory: 48G    # Leave 16G for OS + other processes
+    depends_on:
+      redis:
+        condition: service_healthy
+      timescaledb:
+        condition: service_healthy
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8084/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # ── Redis (frame buffer + pub/sub) ───────────────────────────
+  redis:
+    image: redis:7-alpine
+    container_name: CueCatcher-redis
+    command: >
+      redis-server
+      --maxmemory 2gb
+      --maxmemory-policy allkeys-lru
+      --save ""
+      --appendonly no
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis-data:/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── TimescaleDB (longitudinal behavior data) ─────────────────
+  timescaledb:
+    image: timescale/timescaledb:latest-pg16
+    container_name: CueCatcher-timescaledb
+    environment:
+      - POSTGRES_USER=CueCatcher
+      - POSTGRES_PASSWORD=CueCatcher
+      - POSTGRES_DB=CueCatcher
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescale-data:/var/lib/postgresql/data
+      - ./config/init.sql:/docker-entrypoint-initdb.d/init.sql
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U CueCatcher"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  model-cache:
+    driver: local
+  session-data:
+    driver: local
+  redis-data:
+    driver: local
+  timescale-data:
+    driver: local

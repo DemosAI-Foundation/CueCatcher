@@ -1,0 +1,30 @@
+{
+  "session_id": "8534e6af-3982-4d69-aeeb-bafead3f55f6",
+  "started_at": "2026-04-07T21:25:11.084361+00:00",
+  "ended_at": "2026-04-07T21:26:02.253337+00:00",
+  "duration_minutes": 0.9,
+  "total_frames": 444,
+  "avg_fps": 8.7,
+  "avg_frame_time_ms": 0.0,
+  "total_episodes": 0,
+  "total_interpretations": 0,
+  "confirmed_interpretations": 0,
+  "rejected_interpretations": 0,
+  "episodes_by_type": {},
+  "episodes_by_function": {},
+  "state_durations": {
+    "idle": 22.1,
+    "communicating": 23.9,
+    "attending": 1.7,
+    "withdrawn": 3.5
+  },
+  "state_transitions": 0,
+  "most_common_state": "communicating",
+  "highest_comm_level_observed": 1,
+  "gaze_alternation_count": 0,
+  "coordinated_signals_count": 0,
+  "button_presses": 0,
+  "button_breakdown": {},
+  "vocalization_seconds": 0.0,
+  "vocalization_types": {}
+}

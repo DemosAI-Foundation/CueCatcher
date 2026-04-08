@@ -1,0 +1,169 @@
+# CueCatcher Behavior Dictionary
+#
+# This file stores learned communication patterns specific to the child.
+# Patterns are added through caregiver feedback during sessions.
+#
+# Each entry maps a behavioral signature to a communicative meaning.
+# The system starts with common patterns and learns personalized ones.
+#
+# Format:
+#   pattern_name:
+#     description: what the child means
+#     signals: list of behavioral signals that must co-occur
+#     confidence: how reliable this pattern is (grows with confirmation)
+#     comm_level: Communication Matrix level (1-7)
+#     comm_function: request | reject | social | regulate
+#     confirmed: number of caregiver confirmations
+#     rejected: number of caregiver rejections
+
+# ── Pre-loaded Common Patterns ─────────────────────────────────
+# Based on research on non-verbal autistic children aged 3-4
+
+arms_up_pickup:
+  description: "Wants to be picked up"
+  signals:
+    - action: arms_up
+    - optional: vocalization
+  confidence: 0.80
+  comm_level: 3
+  comm_function: request
+  confirmed: 0
+  rejected: 0
+  notes: "Very common across neurotypes. Both arms raised above shoulders."
+
+reach_toward_object:
+  description: "Wants something they can see"
+  signals:
+    - action: reaching
+    - optional: gaze_toward_target
+    - optional: vocalization
+  confidence: 0.70
+  comm_level: 2
+  comm_function: request
+  confirmed: 0
+  rejected: 0
+  notes: "Confidence increases significantly if gaze alternation is present (Level 3)."
+
+push_away:
+  description: "Doesn't want this / stop"
+  signals:
+    - action: arm_extension_toward_object
+    - head_turn: away
+    - optional: distress_vocalization
+  confidence: 0.75
+  comm_level: 2
+  comm_function: reject
+  confirmed: 0
+  rejected: 0
+
+approach_door:
+  description: "Wants to go outside"
+  signals:
+    - movement: toward_door
+    - optional: vocalization
+    - optional: arm_wave
+  confidence: 0.50
+  comm_level: 2
+  comm_function: request
+  confirmed: 0
+  rejected: 0
+  notes: "Location-specific. Needs object detection to identify door."
+
+hand_lead:
+  description: "Wants adult to come / help with something"
+  signals:
+    - action: hand_contact_with_adult
+    - movement: pulling_direction
+  confidence: 0.75
+  comm_level: 3
+  comm_function: request
+  confirmed: 0
+  rejected: 0
+  notes: "Distinctively autistic requesting pattern — replaces pointing."
+
+gaze_alternation_social:
+  description: "Sharing experience / commenting"
+  signals:
+    - gaze: alternation_object_person
+    - optional: smile
+    - optional: vocalization
+  confidence: 0.85
+  comm_level: 3
+  comm_function: social
+  confirmed: 0
+  rejected: 0
+  notes: >
+    This is the highest-value detection. Joint attention is the core deficit
+    in autism and any instance indicates significant communicative development.
+
+cry_with_body_arch:
+  description: "In pain or strong discomfort"
+  signals:
+    - vocalization: distress_cry
+    - action: body_arch_or_stiffen
+  confidence: 0.80
+  comm_level: 1
+  comm_function: reject
+  confirmed: 0
+  rejected: 0
+  notes: "Pre-intentional communication. Body state indicates strong negative affect."
+
+rocking_calm:
+  description: "Self-soothing — content or processing"
+  signals:
+    - action: rocking
+    - expression: neutral_or_calm
+    - vocalization: absent_or_rhythmic
+  confidence: 0.50
+  comm_level: 1
+  comm_function: regulate
+  confirmed: 0
+  rejected: 0
+  notes: >
+    Important: rocking is NOT always distress. Context determines meaning.
+    Calm face + gentle rocking = contentment. Tense body + vigorous rocking = overwhelm.
+
+arm_wave_excitement:
+  description: "Expressing excitement or joy"
+  signals:
+    - action: arm_waving
+    - expression: happy_or_wide_eyes
+    - optional: pleasure_vocalization
+  confidence: 0.55
+  comm_level: 1
+  comm_function: social
+  confirmed: 0
+  rejected: 0
+  notes: "Happy stimming. Often occurs during favorite activities or anticipation."
+
+stillness_withdrawal:
+  description: "Shutting down — overwhelmed or disengaged"
+  signals:
+    - movement: very_low
+    - gaze: averted
+    - expression: flat
+  confidence: 0.45
+  comm_level: 1
+  comm_function: regulate
+  confirmed: 0
+  rejected: 0
+  notes: >
+    Autistic shutdown. The child may be processing sensory overload.
+    Do not interpret as "not communicating" — this IS communication of overwhelm.
+
+# ── Placeholder for Learned Patterns ───────────────────────────
+# The system will add entries here as caregivers confirm/reject interpretations.
+# Example of a learned pattern:
+#
+# custom_arm_wave_at_kitchen:
+#   description: "Wants a snack"
+#   signals:
+#     - action: arm_wave
+#     - location: kitchen
+#     - time_context: between_meals
+#   confidence: 0.72
+#   comm_level: 3
+#   comm_function: request
+#   confirmed: 14
+#   rejected: 2
+#   learned_at: "2026-04-06T14:30:00Z"
