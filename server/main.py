@@ -16,9 +16,10 @@ from fastapi.responses import FileResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 try:
-    import redis.asyncio as aioredis
+    import sqlite3
+    DB_AVAILABLE = True
 except ImportError:
-    aioredis = None
+    DB_AVAILABLE = False
 import orjson
 
 from config.settings import settings
@@ -28,7 +29,7 @@ from config.settings import settings
 class AppState:
     """Mutable application state shared across the server."""
     def __init__(self):
-        self.redis: aioredis.Redis | None = None
+        self.db = None  # Database connection (optional)
         self.pipeline = None           # InferencePipeline
         self.interpreter = None        # BehaviorInterpreter
         self.tts = None                # VoxtralTTS
@@ -46,18 +47,21 @@ state = AppState()
 async def lifespan(app: FastAPI):
     logger.info("🧭 CueCatcher starting up...")
 
-    # Connect Redis (optional — works without it)
+    # Connect database (optional — works without it)
     try:
-        if aioredis:
-            state.redis = aioredis.from_url(settings.redis_url, decode_responses=False)
-            await state.redis.ping()
-            logger.info("✅ Redis connected")
+        if DB_AVAILABLE and settings.db_url:
+            if settings.db_url.startswith("sqlite"):
+                state.db = sqlite3.connect(settings.db_url.replace("sqlite:///", ""))
+                logger.info("✅ SQLite database connected")
+            else:
+                state.db = None
+                logger.info("ℹ️  PostgreSQL URL detected but using SQLite fallback — in-memory buffer")
         else:
-            state.redis = None
-            logger.info("ℹ️  redis package not installed — using in-memory buffer")
+            state.db = None
+            logger.info("ℹ️  No database configured — using in-memory buffer")
     except Exception as e:
-        state.redis = None
-        logger.warning(f"⚠️  Redis not available ({e}) — using in-memory buffer")
+        state.db = None
+        logger.warning(f"⚠️  Database not available ({e}) — using in-memory buffer")
 
     # Initialize inference pipeline (lazy GPU loading)
     try:
@@ -114,8 +118,8 @@ async def lifespan(app: FastAPI):
     logger.info("🧭 CueCatcher shutting down...")
     if state.recorder and state.active_session_id:
         await state.recorder.stop_session()
-    if state.redis:
-        await state.redis.close()
+    if state.db:
+        state.db.close()  # sqlite3 uses synchronous close
     if state.pipeline:
         state.pipeline.unload()
     if state.tts:
@@ -315,15 +319,10 @@ async def _process_video_frame(jpeg_bytes: bytes, sender: WebSocket):
             None, state.pipeline.process_frame, frame, state.frame_count
         )
 
-        # Store in Redis ring buffer
+        # Store in memory buffer (database ring buffer removed - using in-memory only)
         ts = time.time()
-        if state.redis:
-            key = f"frame:{state.active_session_id}:{state.frame_count}"
-            await state.redis.setex(
-                key,
-                int(settings.tier1_buffer_seconds),
-                orjson.dumps(detections)
-            )
+        # Frame data is kept in the interpreter's sliding window buffers
+        # No external database storage needed for real-time operation
 
         # Run interpretation (if interpreter available)
         interpretation = None
@@ -378,9 +377,8 @@ async def _process_audio_chunk(pcm_bytes: bytes):
         None, state.pipeline.process_audio, pcm_bytes
     )
 
-    if state.redis and audio_result:
-        key = f"audio:{state.active_session_id}:{int(time.time() * 1000)}"
-        await state.redis.setex(key, int(settings.tier1_buffer_seconds), orjson.dumps(audio_result))
+    # Audio data stored in memory only (no external database needed)
+    # The interpreter maintains its own sliding window for audio features
 
 
 async def _speak_interpretation(interpretation: dict):
@@ -535,7 +533,7 @@ else:
             "tts_loaded": state.tts is not None and state.tts.loaded if state.tts else False,
             "tts_mode": state.tts.mode_description if state.tts and hasattr(state.tts, 'mode_description') else "not loaded",
             "recorder_ready": state.recorder is not None,
-            "redis_connected": state.redis is not None,
+            "db_connected": state.db is not None,
             "docs": "/docs",
             "health": "/health",
             "note": "Open /docs for the API explorer. Connect the tablet UI to ws://<this-ip>:4/ws/stream",

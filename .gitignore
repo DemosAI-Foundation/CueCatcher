@@ -1,0 +1,47 @@
+```
+# Logs and temp files
+*.log
+*.tmp
+
+# Environment
+.env
+.env.local
+.env.*
+
+# Editors
+.vscode/
+.idea/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+venv/
+.venv/
+.env
+env/
+ENV/
+.venv.bak/
+venv.bak/
+
+# Build artifacts
+build/
+dist/
+*.egg-info/
+.coverage
+htmlcov/
+.coverage.*
+.nyc_output/
+coverage-final.json
+
+# OS generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+```
