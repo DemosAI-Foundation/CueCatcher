@@ -522,9 +522,9 @@ async def chat_with_llm(message: dict):
     if not user_message:
         return {"error": "No message provided"}
     
-    # Get current session ID from app state if not provided
+    # Get current session ID from request state if not provided
     if not session_id:
-        session_id = getattr(app.state, "current_session_id", None)
+        session_id = getattr(request.state, "current_session_id", None)
     
     if not session_id:
         return {"error": "No session ID provided. Start a session first or provide session_id in request."}
