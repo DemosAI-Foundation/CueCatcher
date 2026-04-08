@@ -14,6 +14,12 @@ import numpy as np
 from loguru import logger
 
 try:
+    import aiosqlite
+    SQLITE_AVAILABLE = True
+except ImportError:
+    SQLITE_AVAILABLE = False
+
+try:
     import asyncpg
     PG_AVAILABLE = True
 except ImportError:
@@ -80,12 +86,35 @@ class SessionRecorder:
         self._state_start = 0.0
 
     async def connect(self):
-        """Connect to SQL database, or fall back to in-memory."""
-        if not self.db_url or not self.db_url.startswith(("postgresql://", "postgres://")):
-            if self.db_url and "sqlite" in self.db_url:
-                logger.warning("⚠️ SQLite DSN detected — asyncpg requires PostgreSQL. Using in-memory buffer.")
-            elif not self.db_url:
-                logger.info("ℹ️ No database URL configured — using in-memory buffer only.")
+        """Connect to SQL database (SQLite or PostgreSQL), or fall back to in-memory."""
+        if not self.db_url:
+            logger.info("ℹ️ No database URL configured — using in-memory buffer only.")
+            return
+
+        # Handle SQLite
+        if self.db_url.startswith("sqlite:///"):
+            if not SQLITE_AVAILABLE:
+                logger.warning("⚠️ aiosqlite not installed — using in-memory buffer only")
+                return
+            
+            db_path = self.db_url.replace("sqlite:///", "")
+            try:
+                self._db_path = db_path
+                # Test connection
+                async with aiosqlite.connect(db_path) as conn:
+                    await conn.execute("SELECT 1")
+                logger.info(f"✅ Session recorder connected to SQLite: {db_path}")
+                
+                # Create tables if they don't exist
+                await self._create_sqlite_tables()
+                return
+            except Exception as e:
+                logger.warning(f"⚠️ SQLite connection failed: {e} — recording to memory only")
+                return
+
+        # Handle PostgreSQL
+        if not self.db_url.startswith(("postgresql://", "postgres://")):
+            logger.warning(f"⚠️ Unknown database URL format: {self.db_url} — using in-memory buffer")
             return
 
         if not PG_AVAILABLE:
@@ -102,10 +131,61 @@ class SessionRecorder:
             )
             async with self._pool.acquire() as conn:
                 await conn.fetchval("SELECT 1")
-            logger.info("✅ Session recorder connected to SQL database")
+            logger.info("✅ Session recorder connected to PostgreSQL database")
         except Exception as e:
             logger.warning(f"⚠️ DB connection failed: {e} — recording to memory only")
             self._pool = None
+
+    async def _create_sqlite_tables(self):
+        """Create SQLite tables if they don't exist."""
+        async with aiosqlite.connect(self._db_path) as conn:
+            await conn.executescript("""
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id TEXT PRIMARY KEY,
+                    started_at TEXT,
+                    ended_at TEXT,
+                    duration REAL,
+                    notes TEXT
+                );
+                
+                CREATE TABLE IF NOT EXISTS frames (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    timestamp REAL,
+                    pose_data TEXT,
+                    gaze_data TEXT,
+                    face_data TEXT,
+                    audio_data TEXT,
+                    action_data TEXT,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+                
+                CREATE TABLE IF NOT EXISTS episodes (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    timestamp REAL,
+                    episode_type TEXT,
+                    confidence REAL,
+                    details TEXT,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+                
+                CREATE TABLE IF NOT EXISTS states (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    session_id TEXT,
+                    timestamp REAL,
+                    state TEXT,
+                    confidence REAL,
+                    interpretation TEXT,
+                    FOREIGN KEY (session_id) REFERENCES sessions(id)
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_frames_session ON frames(session_id);
+                CREATE INDEX IF NOT EXISTS idx_episodes_session ON episodes(session_id);
+                CREATE INDEX IF NOT EXISTS idx_states_session ON states(session_id);
+            """)
+            await conn.commit()
+        logger.info("✅ SQLite tables created/verified")
 
     async def start_session(self, record_video: bool = False) -> str:
         """Start recording a new session."""
@@ -125,12 +205,20 @@ class SessionRecorder:
         sess_dir = self.session_dir / session_id
         sess_dir.mkdir(parents=True, exist_ok=True)
 
-        if self._pool:
+        # Insert session into database
+        if self._pool:  # PostgreSQL
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     "INSERT INTO sessions (id, started_at) VALUES ($1, $2)",
                     uuid.UUID(session_id), self._started_at,
                 )
+        elif hasattr(self, '_db_path'):  # SQLite
+            async with aiosqlite.connect(self._db_path) as conn:
+                await conn.execute(
+                    "INSERT INTO sessions (id, started_at) VALUES (?, ?)",
+                    (session_id, self._started_at.isoformat()),
+                )
+                await conn.commit()
 
         self._record_video = record_video
         if record_video and CV2_AVAILABLE:
@@ -267,7 +355,8 @@ class SessionRecorder:
             with open(bp_path, "w") as f:
                 json.dump(self._button_presses, f, indent=2)
 
-        if self._pool:
+        # Update session in database
+        if self._pool:  # PostgreSQL
             try:
                 async with self._pool.acquire() as conn:
                     await conn.execute(
@@ -281,6 +370,18 @@ class SessionRecorder:
                     )
             except Exception as e:
                 logger.error(f"DB session update failed: {e}")
+        elif hasattr(self, '_db_path'):  # SQLite
+            try:
+                async with aiosqlite.connect(self._db_path) as conn:
+                    await conn.execute(
+                        """UPDATE sessions SET ended_at=?, duration=?, notes=?
+                           WHERE id=?""",
+                        (ended_at.isoformat(), total_minutes, 
+                         json.dumps(summary.to_dict()), self._current_session),
+                    )
+                    await conn.commit()
+            except Exception as e:
+                logger.error(f"SQLite session update failed: {e}")
 
         logger.info(f"📊 Session {self._current_session[:8]}… ended: "
                     f"{total_minutes:.1f} min, {self._frame_count} frames, "
@@ -291,51 +392,97 @@ class SessionRecorder:
 
     async def _flush_batch(self):
         """Flush accumulated detection batches to SQL database."""
-        if not self._pool:
+        # Determine which DB we're using
+        use_postgres = self._pool is not None
+        use_sqlite = hasattr(self, '_db_path')
+        
+        if not use_postgres and not use_sqlite:
             self._detection_batch.clear()
             self._episode_batch.clear()
             self._interpretation_batch.clear()
             return
 
         try:
-            async with self._pool.acquire() as conn:
-                if self._detection_batch:
-                    await conn.executemany(
-                        """INSERT INTO detections (time, session_id, frame_idx, pose, gaze, face, audio)
-                           VALUES ($1, $2::uuid, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb)""",
-                        [(d["time"], d["session_id"], d["frame_idx"],
-                          d["pose"], d["gaze"], d["face"], d["audio"])
-                         for d in self._detection_batch]
-                    )
-                    self._detection_batch.clear()
-
-                if self._episode_batch:
-                    await conn.executemany(
-                        """INSERT INTO episodes (time, session_id, episode_type, duration_ms, confidence, features)
-                           VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb)""",
-                        [(e["time"], e["session_id"], e["episode_type"],
-                          e["duration_ms"], e["confidence"], e["features"])
-                         for e in self._episode_batch]
-                    )
-                    self._episode_batch.clear()
-
-                if self._interpretation_batch:
-                    await conn.executemany(
-                        """INSERT INTO interpretations
-                           (time, session_id, intent, target, description, confidence, comm_level, evidence, spoken)
-                           VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9)""",
-                        [(i["time"], i["session_id"], i["intent"], i["target"],
-                          i["description"], i["confidence"], i["comm_level"],
-                          i["evidence"], i["spoken"])
-                         for i in self._interpretation_batch]
-                    )
-                    self._interpretation_batch.clear()
-
+            if use_postgres:
+                async with self._pool.acquire() as conn:
+                    await self._flush_batch_postgres(conn)
+            elif use_sqlite:
+                async with aiosqlite.connect(self._db_path) as conn:
+                    await self._flush_batch_sqlite(conn)
+                    
         except Exception as e:
             logger.error(f"Batch flush failed: {e}")
             self._detection_batch.clear()
             self._episode_batch.clear()
             self._interpretation_batch.clear()
+
+    async def _flush_batch_postgres(self, conn):
+        """Flush batch to PostgreSQL."""
+        if self._detection_batch:
+            await conn.executemany(
+                """INSERT INTO detections (time, session_id, frame_idx, pose, gaze, face, audio)
+                   VALUES ($1, $2::uuid, $3, $4::jsonb, $5::jsonb, $6::jsonb, $7::jsonb)""",
+                [(d["time"], d["session_id"], d["frame_idx"],
+                  d["pose"], d["gaze"], d["face"], d["audio"])
+                 for d in self._detection_batch]
+            )
+            self._detection_batch.clear()
+
+        if self._episode_batch:
+            await conn.executemany(
+                """INSERT INTO episodes (time, session_id, episode_type, duration_ms, confidence, features)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6::jsonb)""",
+                [(e["time"], e["session_id"], e["episode_type"],
+                  e["duration_ms"], e["confidence"], e["features"])
+                 for e in self._episode_batch]
+            )
+            self._episode_batch.clear()
+
+        if self._interpretation_batch:
+            await conn.executemany(
+                """INSERT INTO interpretations
+                   (time, session_id, intent, target, description, confidence, comm_level, evidence, spoken)
+                   VALUES ($1, $2::uuid, $3, $4, $5, $6, $7, $8::jsonb, $9)""",
+                [(i["time"], i["session_id"], i["intent"], i["target"],
+                  i["description"], i["confidence"], i["comm_level"],
+                  i["evidence"], i["spoken"])
+                 for i in self._interpretation_batch]
+            )
+            self._interpretation_batch.clear()
+
+    async def _flush_batch_sqlite(self, conn):
+        """Flush batch to SQLite."""
+        if self._detection_batch:
+            await conn.executemany(
+                """INSERT INTO frames (session_id, timestamp, pose_data, gaze_data, face_data, audio_data, action_data)
+                   VALUES (?, ?, ?, ?, ?, ?, ?)""",
+                [(d["session_id"], d["time"].timestamp(),
+                  d["pose"], d["gaze"], d["face"], d["audio"], json.dumps({}))
+                 for d in self._detection_batch]
+            )
+            self._detection_batch.clear()
+
+        if self._episode_batch:
+            await conn.executemany(
+                """INSERT INTO episodes (session_id, timestamp, episode_type, confidence, details)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [(e["session_id"], e["time"].timestamp(),
+                  e["episode_type"], e["confidence"], e["features"])
+                 for e in self._episode_batch]
+            )
+            self._episode_batch.clear()
+
+        if self._interpretation_batch:
+            await conn.executemany(
+                """INSERT INTO states (session_id, timestamp, state, confidence, interpretation)
+                   VALUES (?, ?, ?, ?, ?)""",
+                [(i["session_id"], i["time"].timestamp(),
+                  i["intent"], i["confidence"], i["description"])
+                 for i in self._interpretation_batch]
+            )
+            self._interpretation_batch.clear()
+        
+        await conn.commit()
 
 
 class SessionReplayEngine:

@@ -3,11 +3,115 @@ CueCatcher LLM Chat Interface
 Real-time chat with local LLM (llama.cpp) about session data.
 """
 import json
+import sqlite3
 import httpx
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Optional, AsyncGenerator
+from typing import Optional, AsyncGenerator, Dict, Any
 from loguru import logger
+
+# Database path matches server/recorder.py
+DB_PATH = "data/compass.db"
+
+def get_db_connection():
+    """Get a connection to the SQLite database."""
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Enable column access by name
+    return conn
+
+async def fetch_session_data(session_id: str) -> Dict[str, Any]:
+    """Fetch session data directly from SQLite database."""
+    conn = get_db_connection()
+    cursor = conn.cursor()
+    
+    session_data = {
+        "session_id": session_id,
+        "frames": [],
+        "episodes": [],
+        "states": [],
+        "summary": {}
+    }
+    
+    try:
+        # 1. Fetch Frames (Tier 1 Data)
+        cursor.execute("""
+            SELECT timestamp, pose_data, gaze_data, face_data, audio_data, action_data
+            FROM frames 
+            WHERE session_id = ? 
+            ORDER BY timestamp ASC
+        """, (session_id,))
+        
+        frames = []
+        for row in cursor.fetchall():
+            frames.append({
+                "timestamp": row["timestamp"],
+                "pose": json.loads(row["pose_data"]) if row["pose_data"] else {},
+                "gaze": json.loads(row["gaze_data"]) if row["gaze_data"] else {},
+                "face": json.loads(row["face_data"]) if row["face_data"] else {},
+                "audio": json.loads(row["audio_data"]) if row["audio_data"] else {},
+                "action": json.loads(row["action_data"]) if row["action_data"] else {},
+            })
+        session_data["frames"] = frames
+
+        # 2. Fetch Episodes (Tier 2 Data - Behavioral Patterns)
+        cursor.execute("""
+            SELECT timestamp, episode_type, confidence, details
+            FROM episodes 
+            WHERE session_id = ? 
+            ORDER BY timestamp ASC
+        """, (session_id,))
+        
+        episodes = []
+        for row in cursor.fetchall():
+            episodes.append({
+                "timestamp": row["timestamp"],
+                "type": row["episode_type"],
+                "confidence": row["confidence"],
+                "details": json.loads(row["details"]) if row["details"] else {}
+            })
+        session_data["episodes"] = episodes
+
+        # 3. Fetch States (Tier 3 Data - Child State)
+        cursor.execute("""
+            SELECT timestamp, state, confidence, interpretation
+            FROM states 
+            WHERE session_id = ? 
+            ORDER BY timestamp ASC
+        """, (session_id,))
+        
+        states = []
+        for row in cursor.fetchall():
+            states.append({
+                "timestamp": row["timestamp"],
+                "state": row["state"],
+                "confidence": row["confidence"],
+                "interpretation": row["interpretation"]
+            })
+        session_data["states"] = states
+
+        # 4. Fetch Session Summary/Metadata
+        cursor.execute("""
+            SELECT start_time, end_time, duration, notes
+            FROM sessions 
+            WHERE id = ?
+        """, (session_id,))
+        
+        summary_row = cursor.fetchone()
+        if summary_row:
+            session_data["summary"] = {
+                "start_time": summary_row["start_time"],
+                "end_time": summary_row["end_time"],
+                "duration": summary_row["duration"],
+                "notes": summary_row["notes"]
+            }
+            
+    except Exception as e:
+        logger.error(f"Error fetching session data from DB: {e}")
+        raise
+    finally:
+        conn.close()
+        
+    return session_data
 
 
 class LLMChatSession:
